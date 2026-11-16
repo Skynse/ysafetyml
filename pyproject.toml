@@ -1,0 +1,28 @@
+[project]
+name = "ysafetyml"
+version = "0.1.0"
+description = "Fall detection from IMU data (SisFall + LSM6DSOX drop tests)"
+authors = [
+    { name = "Austin", email = "prodbyskynse@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "ipykernel>=7.4.0",
+    "ipywidgets>=8.1.9",
+    "jupyterlab>=4.6.6",
+    "matplotlib>=3.11.2",
+    "nbconvert>=7.17.2",
+    "numpy>=2.5.4",
+    "pandas>=3.1.1",
+    "pyarrow>=26.0.1",
+    "pyserial>=3.5",
+    "rerun-sdk==0.36.0",
+    "scikit-learn>=1.9.1",
+    "scipy>=1.18.1",
+    "seaborn>=0.13.2",
+    "torch>=2.15.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"
