@@ -9,6 +9,10 @@ Each file holds one trial: 9 comma-separated integer columns per row, sampled at
 
 ``load_sisfall`` returns one long DataFrame (one row per sample) with the raw
 counts converted to g and deg/s, plus trial labels and subject metadata.
+
+The raw text files aren't needed once parsed: ``data/sisfall_parquet/`` holds the
+same data (one file per subject, raw int16 counts, ~175 MB in total) and is what
+``load_sisfall`` reads. It is committed to the repo; the raw files are not.
 """
 
 import re
@@ -19,7 +23,7 @@ import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SISFALL_DIR = PROJECT_ROOT / "data" / "sisfall"
-CACHE_PATH = PROJECT_ROOT / "data" / "sisfall.parquet"
+PARQUET_DIR = PROJECT_ROOT / "data" / "sisfall_parquet"
 
 SAMPLE_HZ = 200
 
@@ -99,13 +103,17 @@ def subjects() -> pd.DataFrame:
     return df
 
 
+def read_counts(path: Path) -> np.ndarray:
+    """One trial file as (n, 9) int16 raw sensor counts, columns in ``CHANNELS`` order."""
+    # Lines end in ";\r\n"; treating ";" as a comment drops it so the last column parses as int.
+    return pd.read_csv(
+        path, header=None, names=list(CHANNELS), dtype=np.int16, skipinitialspace=True, comment=";"
+    ).to_numpy()
+
+
 def read_trial(path: Path) -> np.ndarray:
     """One trial file as (n, 9) float32 in g / deg/s, columns in ``CHANNELS`` order."""
-    # Lines end in ";\r\n"; treating ";" as a comment drops it so the last column parses as int.
-    counts = pd.read_csv(
-        path, header=None, names=list(CHANNELS), dtype=np.int32, skipinitialspace=True, comment=";"
-    ).to_numpy()
-    return counts.astype(np.float32) * SCALE
+    return read_counts(path).astype(np.float32) * SCALE
 
 
 def trial_files(root: Path = SISFALL_DIR) -> pd.DataFrame:
@@ -122,34 +130,50 @@ def trial_files(root: Path = SISFALL_DIR) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["activity", "subject", "trial", "path"])
 
 
-def load_sisfall(root: Path = SISFALL_DIR, cache: Path | None = CACHE_PATH) -> pd.DataFrame:
+def write_parquet(root: Path = SISFALL_DIR, out: Path = PARQUET_DIR) -> None:
+    """Parse the raw text files into ``out/<SUBJECT>.parquet`` (activity, trial, raw counts)."""
+    files = trial_files(root)
+    out.mkdir(parents=True, exist_ok=True)
+    for subject, group in files.groupby("subject", sort=True):
+        arrays = [read_counts(p) for p in group["path"]]
+        lengths = [len(a) for a in arrays]
+        df = pd.DataFrame(np.concatenate(arrays), columns=list(CHANNELS))
+        df.insert(0, "activity", np.repeat(group["activity"].to_numpy(), lengths))
+        df.insert(1, "trial", np.repeat(group["trial"].to_numpy(np.int8), lengths))
+        df.to_parquet(out / f"{subject}.parquet", index=False, compression="zstd", compression_level=19)
+
+
+def load_sisfall(parquet_dir: Path = PARQUET_DIR, root: Path = SISFALL_DIR) -> pd.DataFrame:
     """All trials as one long DataFrame, one row per 200 Hz sample.
 
     Columns: ``trial_id`` (e.g. "F05_SA01_R04"), ``activity``, ``subject``, ``trial``,
     ``sample`` (index within trial), ``t`` (seconds), ``is_fall``, then ``CHANNELS``
     (accel in g, gyro in deg/s). Join ``subjects()`` on ``subject`` for demographics.
 
-    Parsing ~4.5k files takes a while, so the result is written to ``cache`` as
-    parquet and read back from there on later calls. Pass ``cache=None`` to skip.
+    Reads ``parquet_dir``; if it is missing, builds it from the raw files in ``root`` first.
     """
-    if cache is not None and cache.exists():
-        return pd.read_parquet(cache)
+    paths = sorted(parquet_dir.glob("S[AE]*.parquet"))
+    if not paths:
+        if not root.is_dir():
+            raise FileNotFoundError(f"neither {parquet_dir} nor the raw dataset in {root} exists")
+        write_parquet(root, parquet_dir)
+        paths = sorted(parquet_dir.glob("S[AE]*.parquet"))
 
-    files = trial_files(root)
-    arrays = [read_trial(p) for p in files["path"]]
-    lengths = np.array([len(a) for a in arrays])
+    parts = [pd.read_parquet(p).assign(subject=p.stem) for p in paths]
+    raw = pd.concat(parts, ignore_index=True)
+    del parts
 
-    meta = files.drop(columns="path").loc[files.index.repeat(lengths)].reset_index(drop=True)
+    meta = raw[["activity", "subject", "trial"]].copy()
     meta.insert(0, "trial_id", meta["activity"] + "_" + meta["subject"] + "_R" + meta["trial"].map("{:02d}".format))
-    meta["sample"] = np.concatenate([np.arange(n, dtype=np.int32) for n in lengths])
+    # rows of a trial are contiguous, so the sample index restarts wherever trial_id changes
+    new_trial = np.r_[True, meta["trial_id"].to_numpy()[1:] != meta["trial_id"].to_numpy()[:-1]]
+    starts = np.flatnonzero(new_trial)
+    meta["sample"] = (np.arange(len(meta)) - np.repeat(starts, np.diff(np.r_[starts, len(meta)]))).astype(np.int32)
     meta["t"] = (meta["sample"] / SAMPLE_HZ).astype(np.float32)
     meta["is_fall"] = meta["activity"].str.startswith("F")
     for col in ("trial_id", "activity", "subject"):
         meta[col] = meta[col].astype("category")
     meta["trial"] = meta["trial"].astype(np.int8)
 
-    df = pd.concat([meta, pd.DataFrame(np.concatenate(arrays), columns=list(CHANNELS))], axis=1)
-
-    if cache is not None:
-        df.to_parquet(cache, index=False)
-    return df
+    values = raw[list(CHANNELS)].to_numpy(np.float32) * SCALE
+    return pd.concat([meta, pd.DataFrame(values, columns=list(CHANNELS))], axis=1)

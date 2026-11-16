@@ -9,8 +9,11 @@ wheels/
 # Virtual environments
 .venv
 
-# Datasets (large; re-extract from the SisFall archive)
-data/
+# Datasets: the raw SisFall text files (data/sisfall/) and the preprocessed
+# "three classes" archive (data/raw/) stay local. The parsed SisFall dataset in
+# data/sisfall_parquet/ is committed.
+data/*
+!data/sisfall_parquet/
 
 # Jupyter
 .ipynb_checkpoints/
